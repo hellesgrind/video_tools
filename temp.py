@@ -169,12 +169,14 @@ def process_video(video_path, languages=["en"], gpu=False, min_confidence=0.4):
     frames_dir = output_dir / "frames"
     boxes_dir = output_dir / "boxes"
     masks_dir = output_dir / "masks"
+    final_masks_dir = output_dir / "final_masks"
 
     os.makedirs(frames_dir)
     os.makedirs(boxes_dir)
     os.makedirs(masks_dir)
+    os.makedirs(final_masks_dir)
 
-    # Open the video
+    # First pass: count total frames in the video
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise ValueError(f"Could not open video at {video_path}")
@@ -183,33 +185,47 @@ def process_video(video_path, languages=["en"], gpu=False, min_confidence=0.4):
     fps = cap.get(cv2.CAP_PROP_FPS)
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    duration = total_frames / fps
 
+    # Count frames manually to ensure accuracy
+    total_frames = 0
+    while True:
+        ret, _ = cap.read()
+        if not ret:
+            break
+        total_frames += 1
+
+    cap.release()
+
+    duration = total_frames / fps
     print(f"Video FPS: {fps}")
     print(f"Video dimensions: {width}x{height}")
-    print(f"Total frames: {total_frames}")
+    print(f"Total frames (counted): {total_frames}")
     print(f"Duration: {duration:.2f} seconds")
 
-    # Calculate frame interval (0.5 seconds)
-    frame_interval = int(fps * 0.5)
-    if frame_interval < 1:
-        frame_interval = 1
+    # Calculate frame processing interval (every FPS/2 frames)
+    process_interval = max(1, int(fps / 2))
+    print(f"Processing every {process_interval} frames")
 
-    # Process frames
+    # Second pass: process frames
+    cap = cv2.VideoCapture(video_path)
     frame_count = 0
-    processed_count = 0
+    last_mask = None
+    last_processed_frame = -process_interval  # To ensure we process the first frame
 
-    while True:
+    while frame_count < total_frames:
         ret, frame = cap.read()
         if not ret:
             break
 
-        # Process every 0.5 seconds
-        if frame_count % frame_interval == 0:
-            # Save the frame
-            frame_path = str(frames_dir / f"frame_{processed_count:04d}.jpg")
-            cv2.imwrite(frame_path, frame)
+        # Save the original frame
+        frame_path = str(frames_dir / f"frame_{frame_count:04d}.jpg")
+        cv2.imwrite(frame_path, frame)
+
+        # Check if this frame should be processed or use the previous mask
+        if frame_count - last_processed_frame >= process_interval:
+            # Process this frame
+            print(f"Processing frame {frame_count}")
+            last_processed_frame = frame_count
 
             # Detect text boxes
             boxes = detect_text_boxes(
@@ -220,48 +236,47 @@ def process_video(video_path, languages=["en"], gpu=False, min_confidence=0.4):
             )
 
             # Draw boxes on frame
-            boxes_path = str(boxes_dir / f"frame_{processed_count:04d}_boxes.jpg")
+            boxes_path = str(boxes_dir / f"frame_{frame_count:04d}_boxes.jpg")
             draw_boxes_on_image(frame_path, boxes, output_path=boxes_path)
 
             # Create text mask
-            mask_path = str(masks_dir / f"frame_{processed_count:04d}_mask.jpg")
-            create_text_mask(frame_path, boxes, output_path=mask_path)
+            mask_path = str(masks_dir / f"frame_{frame_count:04d}_mask.jpg")
+            mask = create_text_mask(frame_path, boxes, output_path=mask_path)
+            last_mask = mask
+        else:
+            # Use the last processed mask
+            if last_mask is not None:
+                mask_path = str(final_masks_dir / f"frame_{frame_count:04d}_mask.jpg")
+                cv2.imwrite(mask_path, last_mask)
 
-            processed_count += 1
+        # Save the mask for this frame (either newly created or copied)
+        final_mask_path = str(final_masks_dir / f"frame_{frame_count:04d}_mask.jpg")
+        if last_mask is not None:
+            cv2.imwrite(final_mask_path, last_mask)
 
         frame_count += 1
 
     cap.release()
 
-    # Calculate how many times each frame should be repeated to match original duration
-    frames_per_segment = frame_interval
+    # Verify we have exactly the right number of frames
+    final_mask_files = list(final_masks_dir.glob("*.jpg"))
+    print(f"Generated {len(final_mask_files)} mask frames")
 
-    # Create a file list for ffmpeg
-    with open(str(output_dir / "mask_frames.txt"), "w") as f:
-        for i in range(processed_count):
-            mask_path = f"masks/frame_{i:04d}_mask.jpg"
-            # Each frame should be repeated for the duration of the interval
-            for _ in range(frames_per_segment):
-                if i < processed_count - 1 or _ < total_frames % frame_interval:
-                    f.write(f"file '{mask_path}'\n")
-                    f.write(f"duration {1/fps}\n")
+    if len(final_mask_files) != total_frames:
+        print(
+            f"WARNING: Number of mask frames ({len(final_mask_files)}) doesn't match original video ({total_frames})"
+        )
 
-    # Add the last entry without duration
-    with open(str(output_dir / "mask_frames.txt"), "a") as f:
-        f.write(f"file 'masks/frame_{processed_count-1:04d}_mask.jpg'\n")
-
-    # Create the output video using ffmpeg
+    # Create the output video using ffmpeg directly with image sequence
     output_video = str(output_dir / f"{video_file.stem}_mask.mp4")
 
     ffmpeg_cmd = [
         "ffmpeg",
         "-y",  # Overwrite output file if it exists
-        "-f",
-        "concat",
-        "-safe",
-        "0",
+        "-framerate",
+        str(fps),
         "-i",
-        str(output_dir / "mask_frames.txt"),
+        str(final_masks_dir / "frame_%04d_mask.jpg"),
         "-c:v",
         "libx264",
         "-pix_fmt",
