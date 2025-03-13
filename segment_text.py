@@ -160,7 +160,7 @@ def process_video(video_path, languages=["en"], gpu=False, min_confidence=0.4):
     """
     # Create output directory
     video_file = Path(video_path)
-    output_dir = video_file.parent / f"{video_file.stem}_output"
+    output_dir = video_file.parent / f"outputs/{video_file.stem}_output"
 
     if output_dir.exists():
         shutil.rmtree(output_dir)
@@ -204,14 +204,19 @@ def process_video(video_path, languages=["en"], gpu=False, min_confidence=0.4):
 
     # Calculate frame processing interval (every FPS/2 frames)
     process_interval = max(1, int(fps / 2))
-    print(f"Processing every {process_interval} frames")
+    print(
+        f"Processing every {process_interval} frames, starting from frame {process_interval}"
+    )
 
     # Second pass: process frames
     cap = cv2.VideoCapture(video_path)
     frame_count = 0
     last_mask = None
-    last_processed_frame = -process_interval  # To ensure we process the first frame
 
+    # First frame to process will be at fps/2
+    first_process_frame = process_interval
+
+    # Process frames
     while frame_count < total_frames:
         ret, frame = cap.read()
         if not ret:
@@ -221,11 +226,14 @@ def process_video(video_path, languages=["en"], gpu=False, min_confidence=0.4):
         frame_path = str(frames_dir / f"frame_{frame_count:04d}.jpg")
         cv2.imwrite(frame_path, frame)
 
-        # Check if this frame should be processed or use the previous mask
-        if frame_count - last_processed_frame >= process_interval:
+        # Check if this frame should be processed
+        should_process = (frame_count >= first_process_frame) and (
+            (frame_count - first_process_frame) % process_interval == 0
+        )
+
+        if should_process:
             # Process this frame
             print(f"Processing frame {frame_count}")
-            last_processed_frame = frame_count
 
             # Detect text boxes
             boxes = detect_text_boxes(
@@ -244,7 +252,8 @@ def process_video(video_path, languages=["en"], gpu=False, min_confidence=0.4):
             mask = create_text_mask(frame_path, boxes, output_path=mask_path)
             last_mask = mask
         else:
-            # Use the last processed mask
+            # For frames before the first processed frame, we'll use the first processed mask
+            # For other frames, use the last processed mask
             if last_mask is not None:
                 mask_path = str(final_masks_dir / f"frame_{frame_count:04d}_mask.jpg")
                 cv2.imwrite(mask_path, last_mask)
@@ -253,6 +262,10 @@ def process_video(video_path, languages=["en"], gpu=False, min_confidence=0.4):
         final_mask_path = str(final_masks_dir / f"frame_{frame_count:04d}_mask.jpg")
         if last_mask is not None:
             cv2.imwrite(final_mask_path, last_mask)
+        else:
+            # If we haven't processed any frames yet, create an empty mask
+            empty_mask = np.zeros((height, width, 3), dtype=np.uint8)
+            cv2.imwrite(final_mask_path, empty_mask)
 
         frame_count += 1
 
@@ -305,13 +318,26 @@ def main():
     # create_text_mask(image_path, boxes, output_path="4_1_first_frame_mask.jpg")
 
     # Example usage with a video
-    video_path = "4_3.mp4"  # Replace with your video path
-    process_video(
-        video_path,
-        languages=["en"],
-        gpu=False,
-        min_confidence=0.4,
-    )
+    video_paths = [
+        "v1.mp4",
+        "v2.mp4",
+        "v3.mp4",
+        "v4.mp4",
+    ]
+    for video_path in video_paths:
+        process_video(
+            video_path,
+            languages=["en"],
+            gpu=False,
+            min_confidence=0.4,
+        )
+    # video_path = "4_3.mp4"  # Replace with your video path
+    # process_video(
+    #     video_path,
+    #     languages=["en"],
+    #     gpu=False,
+    #     min_confidence=0.4,
+    # )
 
 
 if __name__ == "__main__":
