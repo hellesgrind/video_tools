@@ -2,6 +2,9 @@ import cv2
 import numpy as np
 import easyocr
 from pathlib import Path
+import os
+import subprocess
+import shutil
 
 
 def detect_text_boxes(image_path, languages=["en"], gpu=False, min_confidence=0.4):
@@ -142,22 +145,158 @@ def create_text_mask(image_path, boxes, output_path=None):
     return mask
 
 
-def main():
-    image_path = "4_1_first_frame.jpg"
+def process_video(video_path, languages=["en"], gpu=False, min_confidence=0.4):
+    """
+    Process a video file to create a text mask video.
 
-    # Detect text boxes
-    boxes = detect_text_boxes(
-        image_path,
+    Args:
+        video_path (str): Path to the input video
+        languages (list, optional): List of languages to detect. Defaults to ['en'].
+        gpu (bool, optional): Whether to use GPU. Defaults to False.
+        min_confidence (float, optional): Minimum confidence threshold for detection. Defaults to 0.4.
+
+    Returns:
+        str: Path to the output mask video
+    """
+    # Create output directory
+    video_file = Path(video_path)
+    output_dir = video_file.parent / f"{video_file.stem}_output"
+
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+
+    os.makedirs(output_dir)
+    frames_dir = output_dir / "frames"
+    boxes_dir = output_dir / "boxes"
+    masks_dir = output_dir / "masks"
+
+    os.makedirs(frames_dir)
+    os.makedirs(boxes_dir)
+    os.makedirs(masks_dir)
+
+    # Open the video
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video at {video_path}")
+
+    # Get video properties
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    duration = total_frames / fps
+
+    print(f"Video FPS: {fps}")
+    print(f"Video dimensions: {width}x{height}")
+    print(f"Total frames: {total_frames}")
+    print(f"Duration: {duration:.2f} seconds")
+
+    # Calculate frame interval (0.5 seconds)
+    frame_interval = int(fps * 0.5)
+    if frame_interval < 1:
+        frame_interval = 1
+
+    # Process frames
+    frame_count = 0
+    processed_count = 0
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # Process every 0.5 seconds
+        if frame_count % frame_interval == 0:
+            # Save the frame
+            frame_path = str(frames_dir / f"frame_{processed_count:04d}.jpg")
+            cv2.imwrite(frame_path, frame)
+
+            # Detect text boxes
+            boxes = detect_text_boxes(
+                frame_path,
+                languages=languages,
+                gpu=gpu,
+                min_confidence=min_confidence,
+            )
+
+            # Draw boxes on frame
+            boxes_path = str(boxes_dir / f"frame_{processed_count:04d}_boxes.jpg")
+            draw_boxes_on_image(frame_path, boxes, output_path=boxes_path)
+
+            # Create text mask
+            mask_path = str(masks_dir / f"frame_{processed_count:04d}_mask.jpg")
+            create_text_mask(frame_path, boxes, output_path=mask_path)
+
+            processed_count += 1
+
+        frame_count += 1
+
+    cap.release()
+
+    # Calculate how many times each frame should be repeated to match original duration
+    frames_per_segment = frame_interval
+
+    # Create a file list for ffmpeg
+    with open(str(output_dir / "mask_frames.txt"), "w") as f:
+        for i in range(processed_count):
+            mask_path = f"masks/frame_{i:04d}_mask.jpg"
+            # Each frame should be repeated for the duration of the interval
+            for _ in range(frames_per_segment):
+                if i < processed_count - 1 or _ < total_frames % frame_interval:
+                    f.write(f"file '{mask_path}'\n")
+                    f.write(f"duration {1/fps}\n")
+
+    # Add the last entry without duration
+    with open(str(output_dir / "mask_frames.txt"), "a") as f:
+        f.write(f"file 'masks/frame_{processed_count-1:04d}_mask.jpg'\n")
+
+    # Create the output video using ffmpeg
+    output_video = str(output_dir / f"{video_file.stem}_mask.mp4")
+
+    ffmpeg_cmd = [
+        "ffmpeg",
+        "-y",  # Overwrite output file if it exists
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(output_dir / "mask_frames.txt"),
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-r",
+        str(fps),
+        output_video,
+    ]
+
+    subprocess.run(ffmpeg_cmd, check=True)
+    print(f"Mask video created at {output_video}")
+
+    return output_video
+
+
+def main():
+    # Example usage with a single image
+    # image_path = "4_1_first_frame.jpg"
+    # boxes = detect_text_boxes(
+    #     image_path,
+    #     languages=["en"],
+    #     gpu=False,
+    #     min_confidence=0.4,
+    # )
+    # draw_boxes_on_image(image_path, boxes, output_path="4_1_first_frame_boxes.jpg")
+    # create_text_mask(image_path, boxes, output_path="4_1_first_frame_mask.jpg")
+
+    # Example usage with a video
+    video_path = "4_3.mp4"  # Replace with your video path
+    process_video(
+        video_path,
         languages=["en"],
         gpu=False,
         min_confidence=0.4,
     )
-
-    # Draw boxes on original image
-    draw_boxes_on_image(image_path, boxes, output_path="4_1_first_frame_boxes.jpg")
-
-    # Create text mask
-    create_text_mask(image_path, boxes, output_path="4_1_first_frame_mask.jpg")
 
 
 if __name__ == "__main__":
